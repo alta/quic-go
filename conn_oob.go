@@ -79,10 +79,11 @@ func newConn(c OOBCapablePacketConn) (*oobConn, error) {
 	// We don't know if this a IPv4-only, IPv6-only or a IPv4-and-IPv6 connection.
 	// Try enabling receiving of ECN and packet info for both IP versions.
 	// We expect at least one of those syscalls to succeed.
-	var errECNIPv4, errECNIPv6, errPIIPv4, errPIIPv6 error
+	var errECNIPv4, errECNIPv6, errPIIPv4, errPIIPv6, errDontFrag error
 	if err := rawConn.Control(func(fd uintptr) {
 		errECNIPv4 = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_RECVTOS, 1)
 		errECNIPv6 = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_RECVTCLASS, 1)
+		errDontFrag = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_DONTFRAG, 1)
 
 		if needsPacketInfo {
 			errPIIPv4 = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, ipv4RECVPKTINFO, 1)
@@ -100,6 +101,11 @@ func newConn(c OOBCapablePacketConn) (*oobConn, error) {
 		utils.DefaultLogger.Debugf("Activating reading of ECN bits for IPv6.")
 	case errECNIPv4 != nil && errECNIPv6 != nil:
 		return nil, errors.New("activating ECN failed for both IPv4 and IPv6")
+	}
+	if errDontFrag != nil {
+		return nil, errors.New("activating IP_DONTFRAG failed")
+	} else {
+		utils.DefaultLogger.Debugf("Activating IP_DONTFRAG.")
 	}
 	if needsPacketInfo {
 		switch {
