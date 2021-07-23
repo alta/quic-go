@@ -64,7 +64,7 @@ Internally, a `Conn` holds:
 - Peer settings
 
 ```go
-type RawConn interface {
+type Conn interface {
 	AcceptStream(ctx) (http3.Stream, error)
 	AcceptUniStream(ctx) (http3.ReceiveStream, error)
 	OpenStream() (http3.Stream, error)
@@ -77,10 +77,10 @@ type RawConn interface {
 	io.Closer
 }
 
-type Conn interface {
+// Necessary between Requester and Conn?
+type ServerConn interface {
 	AcceptRequest(ctx) (http3.Request, error)
-	PeerSettings() (http3.Settings, error)
-	io.Closer
+	Conn
 }
 ```
 
