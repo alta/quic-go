@@ -92,19 +92,6 @@ type Server struct {
 	// See https://www.ietf.org/archive/id/draft-schinazi-masque-h3-datagram-02.html.
 	EnableDatagrams bool
 
-	// Enable support for extended CONNECT method.
-	// If set to true, the server will support CONNECT requests with a :path and :protocol header.
-	EnableConnectProtocol bool
-
-	// If set, the server will call Requester for each accepted QUIC session.
-	// It is the responsibility of the function to return a valid Requester.
-	// If Requester returns an error, the server will close the QUIC session.
-	// If nil, http3.Open will be used.
-	Requester func(quic.EarlySession, Settings) (Requester, error)
-
-	// StreamHandlers map[uint64]func(quic.EarlySession, quic.ReceiveStream)
-	// FrameHandlers  map[uint64]func(quic.EarlySession, quic.ReceiveStream)
-
 	port uint32 // used atomically
 
 	mutex     sync.Mutex
@@ -113,13 +100,6 @@ type Server struct {
 
 	loggerOnce sync.Once
 	logger     utils.Logger
-}
-
-// Requester represents an HTTP/3 connection.
-// Implementations may implement other interfaces.
-type Requester interface {
-	AcceptHTTP() (*http.Request, http.ResponseWriter, error)
-	io.Closer
 }
 
 // ListenAndServe listens on the UDP address s.Addr and calls s.Handler to handle HTTP/3 requests on incoming connections.
@@ -244,80 +224,6 @@ func (s *Server) removeListener(l *quic.EarlyListener) {
 	delete(s.listeners, l)
 	s.mutex.Unlock()
 }
-
-/*
-
-An http3.Conn holds:
-
-- quic.EarlySession
-- qpack.Decoder
-- control stream
-- peer control stream
-- settings
-- peer settings
-
-It can be created from a quic.EarlySession via:
-
-- http3.Open(quic.EarlySession, http3.Settings)
-
-It has one method:
-
-- (Conn).AcceptRequest(ctx) (http3.Request, error)
-
-It could have additional methods:
-
-- (Conn).AcceptStream(ctx) (http3.Stream, error)
-- (Conn).AcceptUniStream(ctx) (http3.ReceiveStream, error)
-- (Conn).ParseHeaders(http3.HeaderFrame) (http.Header, error)
-
-
-An http3.Stream holds:
-
-- the parent http3.Conn
-- the bidi quic.Stream
-- session ID (request stream ID)
-
-// http3.ReadNextFrame parses the next frame from a stream, including parsing contents for known frame types.
-// For unknown frame types, parsing stops after the frame type. It is up to the caller to continue parsing.
-- http3.ReadNextFrame(http3.ReceiveStream) (http3.Frame, error)
-
-- There can be an http3.UnknownFrame which parses only the frame type and stops.
-
-
-An http3.Frame implements these methods:
-
-- FrameType() http3.FrameType // (uint64)
-- WriteTo(io.Writer) (int, error)
-
-An http3.FrameWithLength implements an additional method:
-
-- FrameLength() protocol.ByteCount
-
-Concrete implementations of http3.Frame MAY implement other methods.
-
-
-https://www.ietf.org/archive/id/draft-ietf-quic-http-34.html#name-http-message-exchanges
-
-An http3.Request holds:
-
-- an http3.Stream
-- headers
-- trailers
-- authority
-- method
-- extended connect bit?
-- request body
-
-It can be created from an http3.Stream via:
-
-- http3.NewRequest(http3.Stream, http.Header) (http3.Request, error)
-
-
-An http3.Server can handle an http3.Request with:
-
-- (Server).ServeHTTP3(http3.Request) error
-
-*/
 
 func (s *Server) handleConn(sess quic.EarlySession) {
 	decoder := qpack.NewDecoder(nil)
