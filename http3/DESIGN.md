@@ -50,7 +50,7 @@ A `Requester` can be extended to support additional features, e.g. `interface Pu
 
 ### `http3.Conn`
 
-Internally, the default implementation of `Requester` sits on top of `http3.Conn`, which combines a `quic.EarlySession` with a QPACK handler. Both H3 client and server connections would use `Conn`.
+Internally, the default implementation of `Requester` sits on top of `http3.Conn`, which combines a `quic.EarlySession` with a QPACK handler and some other state. Both H3 client and server connections would use `Conn`.
 
 It can be created from a quic.EarlySession via `http3.Open(quic.EarlySession, http3.Settings) (Conn, error)`.
 
@@ -64,14 +64,102 @@ Internally, a `Conn` holds:
 - Peer settings
 
 ```go
-type Conn interface {
-	AcceptRequest(ctx) (http3.Request, error)
+type RawConn interface {
 	AcceptStream(ctx) (http3.Stream, error)
 	AcceptUniStream(ctx) (http3.ReceiveStream, error)
-	ParseHeaders(http3.HeaderFrame) (http.Header, error)
-	PeerSettings() (Settings, error)
+	OpenStream() (http3.Stream, error)
+	OpenUniStream(streamType uint64) (http3.SendStream, error)
+
+	DecodeHeaders(io.Reader) (http.Header, error)
+
+	PeerSettings() (http3.Settings, error)
+
+	io.Closer
 }
+
+type Conn interface {
+	AcceptRequest(ctx) (http3.Request, error)
+	PeerSettings() (http3.Settings, error)
+	io.Closer
+}
+```
+
+### `http3.Stream`
+
+- the parent http3.Conn
+- a QUIC stream
+
+```go
+type Stream {
+	FrameReader
+	FrameWriter
+	io.Closer
+}
+
+type ReceiveStream interface {
+	StreamTyper
+	FrameReader
+}
+
+type SendStream interface {
+	StreamTyper
+	FrameWriter
+	io.Closer
+}
+
+type StreamTyper interface {
+	StreamType() uint64
+}
+
+type FrameReader interface {
+	ReadFrame() (http3.Frame, error)
+	Skip(int64) error
+}
+
+type FrameWriter interface {
+	WriteFrame(http3.Frame) error
+}
+```
+
+### `http3.Frame`
+
+- There can be an `http3.UnknownFrame` which parses only the frame type and stops.
+
+```go
+type Frame interface {
+	FrameType() uint64
+	Payload() io.ReadCloser
+}
+```
+
+`Frame` may also implement `FrameLength() protocol.ByteCount` and `io.WriterTo`.
+
+`Payload` may also implement `Size() protocol.ByteCount`.
+
+Concrete implementations of http3.Frame MAY implement other methods.
+
+### `http3.Request`
+
+An [`http3.Request`](https://www.ietf.org/archive/id/draft-ietf-quic-http-34.html#name-http-message-exchanges) holds:
+
+- an `http3.Stream`
+- headers
+- trailers
+- authority
+- method
+- extended connect bit?
+- request body
+
+It can be created from an http3.Stream via:
+
+- http3.NewRequest(http3.Stream, http.Header) (http3.Request, error)
+
+An `http3.Server` can handle an `http3.Request` with:
+
+- (Server).ServeHTTP3(http3.Request) error
 
 ### Misc
 
 - `http3.Settings` is a `map[uint64]uint64` with some helper methods.
+- `http3.Frame` is `interface { FrameType() uint64 }`
+- `io.Reader` is a `Frame`, etc.
