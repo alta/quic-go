@@ -1,5 +1,100 @@
 Here’s a rough design for where I landed with this. In the spirit of “smaller interfaces are better”:
 
+## Notes
+
+Currently, an `http3.Server` handles listening on a UDP port, accepting incoming QUIC connections, negotiating the `h3` ALPN, and then handling HTTP/3 requests from each QUIC session.
+
+One possible way to separate these is to have a QUIC server that negotaties the `h3` ALPN and passes the QUIC session to an `http3.Server` for request routing.
+
+Currently, `http3.Server` takes over the QUIC session and makes certain assumptions about the format of incoming streams and frames. This complicates sharing the same QUIC connection with other protocols, like WebTransport.
+
+The current `http3.Server` implements a translation layer between H3/QUIC and the stdlib `http` package semantics.
+
+- Should the `http3.Server` “own” the QUIC connection, or should it delegate that to another layer?
+- Where is the appropriate place to demultiplex non-H3 protocols on an H3/QUIC connection?
+
+From the client perspective, it might be easier to reason about an H3-capable QUIC connection with an alternative API like `http.RoundTripper` that hides H3 entirely from the client, but exposes it via interface assertion to clients who wish to piggyback other protocols on an HTTP/3 connection.
+
+For instance:
+
+```go
+type Conn interface {
+	// Valid only for server connections
+	AcceptRequest(context.Context) (Request, error)
+
+	// Valid only for client connections
+	OpenRequest() (Request, error)
+
+	AcceptStream(ctx) (quic.Stream, error)
+	AcceptUniStream(ctx) (quic.ReceiveStream, error)
+	OpenStream() (quic.Stream, error)
+	OpenUniStream() (quic.SendStream, error)
+}
+```
+
+Alternatively, the `http3` package could define a `Handler` interface, which acts as a demultiplexer for H3/QUIC sessions:
+
+```go
+type Handler interface {
+	ServeHTTP3(Request)
+	ServeStream(quic.Session, quic.ReceiveStream, uint64)
+	ServeFrame(quic.Session, quic.ReceiveStream, uint64)
+}
+```
+
+- What goroutine would each handler be ran on?
+- Would it be better if the caller controlled parallelism?
+
+What if the `http3` package provided helpers that understood H3 semantics, and handled what it could, but rejected what it couldn’t? Or `http3.Server` delegated what it couldn’t parse to callbacks?
+
+```go
+package http3
+
+// ParseNextFrame parses an HTTP/3 frame from r.
+// For known frame types it will parse the full frame header
+// (a varint type followed by a varint length).
+// For unknown frame types, it will stop reading after parsing the frame type.
+func ParseNextFrame(r io.Reader) (Frame, error)
+```
+
+The following implies an extended `http.Handler` interface. If the caller-supplied `http.Handler` implements the `http3.Handler` interface(s), the server will call those methods for unhandled streams, frames, and datagrams. It is the responsibility of the Handler to close the stream or QUIC session in an error.
+
+```go
+type Handler interface {
+	http.Handler
+	StreamHandler
+	FrameHandler
+	DatagramHandler
+}
+
+type StreamHandler interface {
+	HandleStream(quic.Session, quic.ReceiveStream, uint64)
+}
+
+type FrameHandler interface {
+	HandleFrame(quic.Session, quic.ReceiveStream, uint64)
+}
+
+type DatagramHandler interface {
+	HandleDatagram(quic.Session, []byte)
+}
+```
+
+A WebTransport handler could wrap an `http.Handler` to provide WebTransport functionality:
+
+```go
+package webtransport
+
+type Handler struct {
+	http.Handler
+	// private fields
+}
+
+var _ http3.Handler = &Handler{}
+```
+
+## API
+
 ### `http3.Server`
 
 To enable HTTP/3 extensions, I propose adding a new field to `http3.Server`: `Requester`. If set, it allows callers to intercept an accepted `quic.EarlySession` and provide an `http3.Requester`. It would default to `http3.Accept`, a new exported func that would tie together the QUIC session with a QPACK decoder and some other state (see below).
@@ -10,6 +105,15 @@ To enable HTTP/3 extensions, I propose adding a new field to `http3.Server`: `Re
 	// If Requester returns an error, the server will close the QUIC session.
 	// If nil, http3.Open will be used.
 	Requester func(quic.EarlySession, Settings) (Requester, error)
+
+	// Other functions?
+	HandleConn func(quic.EarlySession) (quic.EarlySession, error)
+	HandleStream func(quic.EarlySession, quic.ReceiveStream, uint64) (quic.ReceiveStream, error)
+	HandleFrame func(quic.EarlySession, quic.ReceiveStream, uint64) (quic.ReceiveStream, error)
+
+	// Handlers?
+	StreamHandlers map[uint64]func(quic.EarlySession, quic.ReceiveStream) quic.ReceiveStream
+	FrameHandlers map[uint64]func(quic.EarlySession, quic.ReceiveStream) quic.ReceiveStream
 ```
 
 Second, add a flag to `Server` to enable the [extended CONNECT method](https://datatracker.ietf.org/doc/html/rfc8441) (necessary for WebTransport or WebSockets):
@@ -57,11 +161,13 @@ It can be created from a quic.EarlySession via `http3.Open(quic.EarlySession, ht
 Internally, a `Conn` holds:
 
 - `quic.EarlySession`
-- `qpack.Decoder`
+- H3 settings
+- Peer settings
 - Control stream
 - Peer control stream
-- Settings
-- Peer settings
+- `qpack.Decoder`
+- QPACK encoder and decoder streams
+- Push streams
 
 ```go
 type Conn interface {
@@ -69,6 +175,13 @@ type Conn interface {
 	AcceptUniStream(ctx) (http3.ReceiveStream, error)
 	OpenStream() (http3.Stream, error)
 	OpenUniStream(streamType uint64) (http3.SendStream, error)
+
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+
+	SupportsDatagrams() bool
+	ReadDatagram() ([]byte, error)
+	WriteDatagram([]byte) error
 
 	DecodeHeaders(io.Reader) (http.Header, error)
 
@@ -91,33 +204,21 @@ type ServerConn interface {
 
 ```go
 type Stream {
-	FrameReader
-	FrameWriter
-	io.Closer
+	ReceiveStream
+	SendStream
 }
 
 type ReceiveStream interface {
-	StreamTyper
-	FrameReader
+	Conn() Conn
+	StreamType() uint64
+	io.Reader
 }
 
 type SendStream interface {
-	StreamTyper
-	FrameWriter
-	io.Closer
-}
-
-type StreamTyper interface {
+	Conn() Conn
 	StreamType() uint64
-}
-
-type FrameReader interface {
-	ReadFrame() (http3.Frame, error)
-	Skip(int64) error
-}
-
-type FrameWriter interface {
-	WriteFrame(http3.Frame) error
+	io.Writer
+	io.Closer
 }
 ```
 
@@ -162,4 +263,4 @@ An `http3.Server` can handle an `http3.Request` with:
 
 - `http3.Settings` is a `map[uint64]uint64` with some helper methods.
 - `http3.Frame` is `interface { FrameType() uint64 }`
-- `io.Reader` is a `Frame`, etc.
+- `http3.SettingsFrame` is a `Frame`, etc.
