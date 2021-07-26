@@ -13,70 +13,76 @@ import (
 const (
 	FrameTypeSettings = 0x4
 
-	SettingDatagram = 0x276
+	// https://www.ietf.org/archive/id/draft-ietf-masque-h3-datagram-02.html#name-http-settings-parameter
+	SettingDatagram = 0xffd276
+
+	// https://datatracker.ietf.org/doc/draft-ietf-masque-h3-datagram/00/
+	SettingDatagramDraft00 = 0x276
 )
 
-type Settings interface {
-	Has(id uint64) bool
-	Get(id uint64) uint64
-	Set(id, value uint64)
-	Delete(id uint64)
-	Count() int
-	WriteFrame(w io.Writer) error
+type Setting uint64
+
+func (s Setting) String() string {
+	switch s {
+	case SettingDatagram:
+		return "H3_DATAGRAM"
+	default:
+		return fmt.Sprintf("H3 SETTING 0x%x", s)
+	}
 }
 
-type settings map[uint64]uint64
+type Settings map[Setting]uint64
 
-func NewSettings() Settings {
-	return settings{}
+func (s Settings) FrameType() uint64 {
+	return FrameTypeSettings
 }
 
-func (s settings) Has(id uint64) bool {
-	_, ok := s[id]
-	return ok
+func (s Settings) FrameLength() protocol.ByteCount {
+	var len protocol.ByteCount
+	for id, val := range s {
+		len += quicvarint.Len(uint64(id)) + quicvarint.Len(val)
+	}
+	return len
 }
 
-func (s settings) Get(id uint64) uint64 {
-	return s[id]
-}
-
-func (s settings) Set(id, value uint64) {
-	s[id] = value
-}
-
-func (s settings) Delete(id uint64) {
-	delete(s, id)
-}
-
-func (s settings) Count() int {
-	return len(s)
-}
-
-func (s settings) WriteFrame(w io.Writer) error {
-	quicvarint.Write(w, uint64(s.FrameType()))
-	quicvarint.Write(w, uint64(s.FrameLength()))
-	ids := make([]uint64, 0, len(s))
+func (s Settings) WriteFrame(w io.Writer) error {
+	qw := quicvarint.NewWriter(w)
+	quicvarint.Write(qw, uint64(s.FrameType()))
+	quicvarint.Write(qw, uint64(s.FrameLength()))
+	ids := make([]Setting, 0, len(s))
 	for id := range s {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return i < j })
 	for _, id := range ids {
-		quicvarint.Write(w, id)
-		quicvarint.Write(w, s[id])
+		quicvarint.Write(qw, uint64(id))
+		quicvarint.Write(qw, s[id])
 	}
 	return nil
 }
 
-func (s settings) FrameType() uint64 {
-	return FrameTypeSettings
-}
-
-func (s settings) FrameLength() protocol.ByteCount {
-	var len protocol.ByteCount
-	for id, val := range s {
-		len += quicvarint.Len(id) + quicvarint.Len(val)
+func (s Settings) UnmarshalFrame(b []byte) error {
+	if len(b) > 8*(1<<10) {
+		return fmt.Errorf("unexpected size for SETTINGS frame: %d", len(b))
 	}
-	return len
+	*(&s) = Settings{}
+	r := bytes.NewReader(b)
+	for r.Len() > 0 {
+		id, err := quicvarint.Read(r)
+		if err != nil { // should not happen. We allocated the whole frame already.
+			return err
+		}
+		val, err := quicvarint.Read(r)
+		if err != nil { // should not happen. We allocated the whole frame already.
+			return err
+		}
+
+		if _, ok := s[Setting(id)]; ok {
+			return fmt.Errorf("duplicate setting: %d", id)
+		}
+		s[Setting(id)] = val
+	}
+	return nil
 }
 
 func ReadSettingsFrame(r io.Reader, l uint64) (Settings, error) {
@@ -90,7 +96,7 @@ func ReadSettingsFrame(r io.Reader, l uint64) (Settings, error) {
 		}
 		return nil, err
 	}
-	s := NewSettings()
+	s := Settings{}
 	b := bytes.NewReader(buf)
 	for b.Len() > 0 {
 		id, err := quicvarint.Read(b)
@@ -101,11 +107,10 @@ func ReadSettingsFrame(r io.Reader, l uint64) (Settings, error) {
 		if err != nil { // should not happen. We allocated the whole frame already.
 			return nil, err
 		}
-
-		if s.Has(id) {
+		if _, ok := s[Setting(id)]; ok {
 			return nil, fmt.Errorf("duplicate setting: %d", id)
 		}
-		s.Set(id, val)
+		s[Setting(id)] = val
 	}
 	return s, nil
 }
