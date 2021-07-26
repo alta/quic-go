@@ -57,25 +57,13 @@ package http3
 func ParseNextFrame(r io.Reader) (Frame, error)
 ```
 
-The following implies an extended `http.Handler` interface. If the caller-supplied `http.Handler` implements the `http3.Handler` interface(s), the server will call those methods for unhandled streams, frames, and datagrams. It is the responsibility of the Handler to close the stream or QUIC session in an error.
+The following implies an extended `http.Handler` interface. If the caller-supplied `http.Handler` implements the `http3.Extension` interface, the server will call those methods for unhandled streams, frames, and datagrams. It is the responsibility of the extension to close the stream or QUIC session in an error.
 
 ```go
-type Handler interface {
-	http.Handler
-	StreamHandler
-	FrameHandler
-	DatagramHandler
-}
-
-type StreamHandler interface {
+type Extension interface {
+	Settings() Settings
 	HandleStream(quic.Session, quic.ReceiveStream, uint64)
-}
-
-type FrameHandler interface {
 	HandleFrame(quic.Session, quic.ReceiveStream, uint64)
-}
-
-type DatagramHandler interface {
 	HandleDatagram(quic.Session, []byte)
 }
 ```
@@ -90,7 +78,7 @@ type Handler struct {
 	// private fields
 }
 
-var _ http3.Handler = &Handler{}
+var _ http3.Extension = &Handler{}
 ```
 
 ## API
