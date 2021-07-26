@@ -50,21 +50,30 @@ func parseNextFrame(r io.Reader) (frame, error) {
 }
 
 type dataFrame struct {
-	Length uint64
+	length uint64
 }
 
-func (f *dataFrame) Write(b *bytes.Buffer) {
-	quicvarint.Write(b, 0x0)
-	quicvarint.Write(b, f.Length)
+var _ Frame = &dataFrame{}
+
+func (f *dataFrame) FrameType() FrameType {
+	return FrameTypeData
+}
+
+func (f *dataFrame) FrameLength() protocol.ByteCount {
+	return protocol.ByteCount(f.length)
+}
+
+func (f *dataFrame) WriteFrame(w quicvarint.Writer) error {
+	return WriteFrameHeader(w, f)
 }
 
 type headersFrame struct {
-	Length uint64
+	length uint64
 }
 
 func (f *headersFrame) Write(b *bytes.Buffer) {
-	quicvarint.Write(b, 0x1)
-	quicvarint.Write(b, f.Length)
+	quicvarint.Write(b, uint64(FrameTypeHeaders))
+	quicvarint.Write(b, f.length)
 }
 
 const settingDatagram = 0x276

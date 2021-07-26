@@ -1,6 +1,11 @@
 package http3
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/lucas-clemente/quic-go/quicvarint"
+)
 
 const (
 	FrameTypeData          FrameType = 0x0
@@ -39,4 +44,25 @@ func (t FrameType) String() string {
 	default:
 		return fmt.Sprintf("H3 frame type 0x%x", uint64(t))
 	}
+}
+
+// Frame represents an HTTP/3 frame.
+// Extension frames without a length should return -1 from FrameLength.
+type Frame interface {
+	FrameType() FrameType
+	FrameLength() protocol.ByteCount
+	WriteFrame(quicvarint.Writer) error
+}
+
+// WriteFrameHeader writes an HTTP/3 frame header to w.
+func WriteFrameHeader(w quicvarint.Writer, f Frame) error {
+	len := f.FrameLength()
+	if len < 0 && len != protocol.InvalidByteCount {
+		return fmt.Errorf("invalid frame length: %d", len)
+	}
+	quicvarint.Write(w, uint64(FrameTypeData))
+	if len != protocol.InvalidByteCount {
+		quicvarint.Write(w, uint64(len))
+	}
+	return nil
 }
